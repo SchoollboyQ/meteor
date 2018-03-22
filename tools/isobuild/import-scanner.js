@@ -21,6 +21,7 @@ import {
   pathIsAbsolute,
   convertToOSPath,
   convertToPosixPath,
+  realpathOrNull,
 } from "../fs/files.js";
 
 const {
@@ -163,6 +164,8 @@ export default class ImportScanner {
     this.nodeModulesPaths = nodeModulesPaths;
     this.watchSet = watchSet;
     this.absPathToOutputIndex = Object.create(null);
+    this.realPathToFile = Object.create(null);
+    this.realPathCache = Object.create(null);
     this.allMissingModules = Object.create(null);
     this.outputFiles = [];
 
@@ -193,9 +196,9 @@ export default class ImportScanner {
   }
 
   _getFile(absPath) {
-    absPath = absPath.toLowerCase();
-    if (has(this.absPathToOutputIndex, absPath)) {
-      return this.outputFiles[this.absPathToOutputIndex[absPath]];
+    const absLowerPath = absPath.toLowerCase();
+    if (has(this.absPathToOutputIndex, absLowerPath)) {
+      return this.outputFiles[this.absPathToOutputIndex[absLowerPath]];
     }
   }
 
@@ -205,8 +208,8 @@ export default class ImportScanner {
       return file;
     }
 
-    absPath = absPath.toLowerCase();
-    const old = this.absPathToOutputIndex[absPath];
+    const absLowerPath = absPath.toLowerCase();
+    const old = this.absPathToOutputIndex[absLowerPath];
 
     if (old) {
       // If the old file is just an empty stub, let the new file take
@@ -225,11 +228,20 @@ export default class ImportScanner {
       }
 
     } else {
-      this.absPathToOutputIndex[absPath] =
+      this.absPathToOutputIndex[absLowerPath] =
         this.outputFiles.push(file) - 1;
 
       return file;
     }
+  }
+
+  _realPathOrNull(absPath) {
+    if (has(this.realPathCache, absPath)) {
+      return this.realPathCache[absPath];
+    }
+
+    // TODO Use optimisticLStatOrNull.
+    return this.realPathCache[absPath] = realpathOrNull(absPath);
   }
 
   addInputFiles(files) {
@@ -265,6 +277,11 @@ export default class ImportScanner {
         // Collisions can happen if a compiler plugin calls addJavaScript
         // multiple times with the same sourcePath. #6422
         this._combineFiles(this._getFile(absPath), file);
+      }
+
+      const realPath = this._realPathOrNull(absPath);
+      if (realPath && ! has(this.realPathToFile, realPath)) {
+        this.realPathToFile[realPath] = file;
       }
     });
 
@@ -779,8 +796,29 @@ export default class ImportScanner {
         return;
       }
 
-      if (! this.isWeb() &&
-          absModuleId.startsWith("/node_modules/")) {
+      // If we already have a file with the same real path, use its data
+      // rather than reading the file again, or generating a stub. This
+      // behavior enables selective compilation of node_modules by simply
+      // symlinking the package directory into the application, so that it
+      // will be compiled as application code. When the package is
+      // imported from node_modules, the compiled version will be used
+      // instead of the raw version found in node_modules. See also:
+      // https://github.com/meteor/meteor-feature-requests/issues/6
+      const realPath = this._realPathOrNull(absImportedPath);
+      if (realPath && has(this.realPathToFile, realPath)) {
+        const file = this.realPathToFile[realPath];
+
+        depFile = {
+          data: file.data,
+          dataString: file.dataString,
+          hash: file.hash,
+          // Borrow file.deps if possible, in case we've already scanned
+          // this file, so we don't try to analyze its dependencies again.
+          deps: file.deps,
+        };
+
+      } else if (! this.isWeb() &&
+                 absModuleId.startsWith("/node_modules/")) {
         // On the server, modules in node_modules directories will be
         // handled natively by Node, so we just need to generate a stub
         // module that calls module.useNode(), rather than calling
@@ -1247,6 +1285,7 @@ const ISp = ImportScanner.prototype;
 [ "_addPkgJsonToOutput",
   "_findImportedModuleIdentifiers",
   "_getAbsModuleId",
+  "_realPathOrNull",
   "_readFile",
   "_resolve",
   "_resolvePkgJsonBrowserAliases",
