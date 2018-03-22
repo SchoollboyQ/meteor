@@ -779,8 +779,6 @@ export default class ImportScanner {
         return;
       }
 
-      info.absModuleId = absModuleId;
-
       if (! this.isWeb() &&
           absModuleId.startsWith("/node_modules/")) {
         // On the server, modules in node_modules directories will be
