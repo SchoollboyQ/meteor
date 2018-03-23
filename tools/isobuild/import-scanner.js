@@ -166,7 +166,6 @@ export default class ImportScanner {
     this.nodeModulesPaths = nodeModulesPaths;
     this.watchSet = watchSet;
     this.absPathToOutputIndex = Object.create(null);
-    this.realPathToFile = Object.create(null);
     this.realPathCache = Object.create(null);
     this.allMissingModules = Object.create(null);
     this.outputFiles = [];
@@ -271,11 +270,6 @@ export default class ImportScanner {
         // multiple times with the same sourcePath. #6422
         this._combineFiles(this._getFile(absPath), file);
       }
-
-      const realPath = this._realPath(absPath);
-      if (realPath && ! has(this.realPathToFile, realPath)) {
-        this.realPathToFile[realPath] = file;
-      }
     });
 
     return this;
@@ -321,12 +315,11 @@ export default class ImportScanner {
   // file.targetPath differs from file.sourcePath.
   _checkSourceAndTargetPaths(file) {
     file.sourcePath = this._getSourcePath(file);
+    file.targetPath = this._getTargetPath(file);
 
     if (! isString(file.targetPath)) {
       return;
     }
-
-    file.targetPath = pathNormalize(pathJoin(".", file.targetPath));
 
     if (file.targetPath !== file.sourcePath) {
       const absSourcePath = pathJoin(this.sourceRoot, file.sourcePath);
@@ -348,7 +341,11 @@ export default class ImportScanner {
           servePath: stripLeadingSlash(absSourceId),
           absModuleId: absSourceId,
           dataString: "",
-          deps: {},
+          // A single dependency on absTargetId will be added to this
+          // object at the end of this function, so that we don't have to
+          // use findImportedModuleIdentifiers to scan the stub module for
+          // that one dependency.
+          deps: Object.create(null),
           lazy: true,
           imported: false,
         });
@@ -646,6 +643,36 @@ export default class ImportScanner {
     return pathNormalize(pathJoin(".", sourcePath));
   }
 
+  // Should be called after `file.sourcePath = this._getSourcePath(file)`.
+  _getTargetPath(file) {
+    let { sourcePath, targetPath } = file;
+    const absSourcePath = pathJoin(this.sourceRoot, sourcePath);
+
+    if (isString(targetPath)) {
+      targetPath = pathNormalize(pathJoin(".", targetPath));
+
+      if (targetPath === sourcePath) {
+        const realPath = this._realPath(absSourcePath);
+        if (realPath !== absSourcePath) {
+          return pathRelative(this.sourceRoot, realPath);
+        }
+      }
+
+      return targetPath;
+    }
+
+    const realPath = this._realPath(absSourcePath);
+    if (realPath !== absSourcePath) {
+      return pathRelative(this.sourceRoot, realPath);
+    }
+
+    // If targetPath was not defined, or the this._realPath(absSourcePath)
+    // was not different from absSourcePath, return sourcePath as the
+    // targetPath, so that _checkSourceAndTargetPaths won't attempt to
+    // generate separate modules.
+    return sourcePath;
+  }
+
   _findImportedModuleIdentifiers(file) {
     if (IMPORT_SCANNER_CACHE.has(file.hash)) {
       return IMPORT_SCANNER_CACHE.get(file.hash);
@@ -825,29 +852,8 @@ export default class ImportScanner {
         return;
       }
 
-      // If we already have a file with the same real path, use its data
-      // rather than reading the file again, or generating a stub. This
-      // behavior enables selective compilation of node_modules by simply
-      // symlinking the package directory into the application, so that it
-      // will be compiled as application code. When the package is
-      // imported from node_modules, the compiled version will be used
-      // instead of the raw version found in node_modules. See also:
-      // https://github.com/meteor/meteor-feature-requests/issues/6
-      const realPath = this._realPath(absImportedPath);
-      if (realPath && has(this.realPathToFile, realPath)) {
-        const file = this.realPathToFile[realPath];
-
-        depFile = {
-          data: file.data,
-          dataString: file.dataString,
-          hash: file.hash,
-          // Borrow file.deps if possible, in case we've already scanned
-          // this file, so we don't try to analyze its dependencies again.
-          deps: file.deps,
-        };
-
-      } else if (! this.isWeb() &&
-                 absModuleId.startsWith("/node_modules/")) {
+      if (! this.isWeb() &&
+          absModuleId.startsWith("/node_modules/")) {
         // On the server, modules in node_modules directories will be
         // handled natively by Node, so we just need to generate a stub
         // module that calls module.useNode(), rather than calling
