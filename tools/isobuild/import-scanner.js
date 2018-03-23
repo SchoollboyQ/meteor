@@ -18,6 +18,7 @@ import {
   pathNormalize,
   pathBasename,
   pathExtname,
+  pathDirname,
   pathIsAbsolute,
   convertToOSPath,
   convertToPosixPath,
@@ -33,6 +34,7 @@ const {
 import {
   optimisticReadFile,
   optimisticStatOrNull,
+  optimisticLStatOrNull,
   optimisticHashOrNull,
   shouldWatch,
 } from "../fs/optimistic.js";
@@ -235,15 +237,6 @@ export default class ImportScanner {
     }
   }
 
-  _realPathOrNull(absPath) {
-    if (has(this.realPathCache, absPath)) {
-      return this.realPathCache[absPath];
-    }
-
-    // TODO Use optimisticLStatOrNull.
-    return this.realPathCache[absPath] = realpathOrNull(absPath);
-  }
-
   addInputFiles(files) {
     files.forEach(file => {
       this._checkSourceAndTargetPaths(file);
@@ -279,13 +272,49 @@ export default class ImportScanner {
         this._combineFiles(this._getFile(absPath), file);
       }
 
-      const realPath = this._realPathOrNull(absPath);
+      const realPath = this._realPath(absPath);
       if (realPath && ! has(this.realPathToFile, realPath)) {
         this.realPathToFile[realPath] = file;
       }
     });
 
     return this;
+  }
+
+  _realPath(absPath) {
+    if (has(this.realPathCache, absPath)) {
+      return this.realPathCache[absPath];
+    }
+
+    let relativePath = pathRelative(this.sourceRoot, absPath);
+    if (relativePath.startsWith("..")) {
+      // If the absPath is outside this.sourceRoot, assume it's real.
+      return this.realPathCache[absPath] = absPath;
+    }
+
+    let foundSymbolicLink = false;
+
+    while (! foundSymbolicLink) {
+      const testPath = pathJoin(this.sourceRoot, relativePath);
+      if (testPath === this.sourceRoot) {
+        // Don't test the sourceRoot itself.
+        break;
+      }
+
+      const lstat = optimisticLStatOrNull(testPath);
+      if (lstat && lstat.isSymbolicLink()) {
+        foundSymbolicLink = true;
+        break
+      }
+
+      relativePath = pathDirname(relativePath);
+    }
+
+    if (foundSymbolicLink) {
+      return this.realPathCache[absPath] = realpathOrNull(absPath);
+    }
+
+    return this.realPathCache[absPath] = absPath;
   }
 
   // Make sure file.sourcePath is defined, and handle the possibility that
@@ -804,7 +833,7 @@ export default class ImportScanner {
       // imported from node_modules, the compiled version will be used
       // instead of the raw version found in node_modules. See also:
       // https://github.com/meteor/meteor-feature-requests/issues/6
-      const realPath = this._realPathOrNull(absImportedPath);
+      const realPath = this._realPath(absImportedPath);
       if (realPath && has(this.realPathToFile, realPath)) {
         const file = this.realPathToFile[realPath];
 
@@ -1285,7 +1314,7 @@ const ISp = ImportScanner.prototype;
 [ "_addPkgJsonToOutput",
   "_findImportedModuleIdentifiers",
   "_getAbsModuleId",
-  "_realPathOrNull",
+  "_realPath",
   "_readFile",
   "_resolve",
   "_resolvePkgJsonBrowserAliases",
